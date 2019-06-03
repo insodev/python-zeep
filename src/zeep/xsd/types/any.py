@@ -22,7 +22,9 @@ class AnyType(Type):
 
     def render(self, parent, value, xsd_type=None, render_path=None):
         if etree.iselement(value):
-            parent.append(value)
+            for child in value:
+                parent.append(child)
+
         elif isinstance(value, AnyObject):
             if value.xsd_type is None:
                 parent.set(xsi_ns("nil"), "true")
