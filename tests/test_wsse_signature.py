@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+from lxml import etree
 from lxml.etree import QName
 
 from tests.utils import load_xml
@@ -10,12 +11,19 @@ from zeep.exceptions import SignatureVerificationFailed
 from zeep.wsse import signature
 from zeep.wsse.signature import xmlsec as xmlsec_installed
 
-DS_NS = "http://www.w3.org/2000/09/xmldsig#"
-
-
 KEY_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "cert_valid.pem")
 KEY_FILE_PW = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "cert_valid_pw.pem"
+)
+
+SIGNATURE_METHODS_TESTDATA = (
+    ("RSA_SHA1", "http://www.w3.org/2000/09/xmldsig#rsa-sha1"),
+    ("RSA_SHA256", "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+)
+
+DIGEST_METHODS_TESTDATA = (
+    ("SHA1", "http://www.w3.org/2000/09/xmldsig#sha1"),
+    ("SHA256", "http://www.w3.org/2001/04/xmlenc#sha256"),
 )
 
 
@@ -27,7 +35,46 @@ skip_if_no_xmlsec = pytest.mark.skipif(
 
 
 @skip_if_no_xmlsec
-def test_sign():
+def test_sign_timestamp_if_present():
+    envelope = load_xml(
+        """
+        <soap-env:Envelope
+            xmlns:ns0="http://example.com/stockquote.xsd"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+            xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:wsu="http://schemas.xmlsoap.org/ws/2003/06/utility"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+          <soap-env:Header xmlns:ns0="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+            <ns0:Security>
+              <wsu:Timestamp xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+                    <wsu:Created>2018-11-18T15:44:27Z</wsu:Created>
+                    <wsu:Expires>2018-11-18T15:54:27Z</wsu:Expires>
+              </wsu:Timestamp>
+            </ns0:Security>
+          </soap-env:Header>
+          <soap-env:Body>
+            <ns0:TradePriceRequest>
+              <tickerSymbol>foobar</tickerSymbol>
+              <ns0:country/>
+            </ns0:TradePriceRequest>
+          </soap-env:Body>
+        </soap-env:Envelope>
+    """
+    )
+
+    signature.sign_envelope(envelope, KEY_FILE, KEY_FILE)
+    signature.verify_envelope(envelope, KEY_FILE)
+
+
+@skip_if_no_xmlsec
+@pytest.mark.parametrize("digest_method,expected_digest_href", DIGEST_METHODS_TESTDATA)
+@pytest.mark.parametrize(
+    "signature_method,expected_signature_href", SIGNATURE_METHODS_TESTDATA
+)
+def test_sign(
+    digest_method, signature_method, expected_digest_href, expected_signature_href
+):
     envelope = load_xml(
         """
         <soapenv:Envelope
@@ -45,8 +92,23 @@ def test_sign():
     """
     )
 
-    signature.sign_envelope(envelope, KEY_FILE, KEY_FILE)
+    signature.sign_envelope(
+        envelope,
+        KEY_FILE,
+        KEY_FILE,
+        signature_method=getattr(xmlsec_installed.Transform, signature_method),
+        digest_method=getattr(xmlsec_installed.Transform, digest_method),
+    )
     signature.verify_envelope(envelope, KEY_FILE)
+
+    digests = envelope.xpath("//ds:DigestMethod", namespaces={"ds": ns.DS})
+    assert len(digests)
+    for digest in digests:
+        assert digest.get("Algorithm") == expected_digest_href
+    signatures = envelope.xpath("//ds:SignatureMethod", namespaces={"ds": ns.DS})
+    assert len(signatures)
+    for sig in signatures:
+        assert sig.get("Algorithm") == expected_signature_href
 
 
 @skip_if_no_xmlsec
@@ -126,7 +188,13 @@ def test_signature():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="does not run on windows")
-def test_signature_binary():
+@pytest.mark.parametrize("digest_method,expected_digest_href", DIGEST_METHODS_TESTDATA)
+@pytest.mark.parametrize(
+    "signature_method,expected_signature_href", SIGNATURE_METHODS_TESTDATA
+)
+def test_signature_binary(
+    digest_method, signature_method, expected_digest_href, expected_signature_href
+):
     envelope = load_xml(
         """
         <soapenv:Envelope
@@ -144,7 +212,13 @@ def test_signature_binary():
     """
     )
 
-    plugin = wsse.BinarySignature(KEY_FILE_PW, KEY_FILE_PW, "geheim")
+    plugin = wsse.BinarySignature(
+        KEY_FILE_PW,
+        KEY_FILE_PW,
+        "geheim",
+        signature_method=getattr(xmlsec_installed.Transform, signature_method),
+        digest_method=getattr(xmlsec_installed.Transform, digest_method),
+    )
     envelope, headers = plugin.apply(envelope, {})
     plugin.verify(envelope)
     # Test the reference
@@ -158,3 +232,12 @@ def test_signature_binary():
         namespaces={"soapenv": ns.SOAP_ENV_11, "wsse": ns.WSSE, "ds": ns.DS},
     )[0]
     assert "#" + bintok.attrib[QName(ns.WSU, "Id")] == ref.attrib["URI"]
+
+    digests = envelope.xpath("//ds:DigestMethod", namespaces={"ds": ns.DS})
+    assert len(digests)
+    for digest in digests:
+        assert digest.get("Algorithm") == expected_digest_href
+    signatures = envelope.xpath("//ds:SignatureMethod", namespaces={"ds": ns.DS})
+    assert len(signatures)
+    for sig in signatures:
+        assert sig.get("Algorithm") == expected_signature_href
